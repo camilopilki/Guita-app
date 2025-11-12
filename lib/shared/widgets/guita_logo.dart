@@ -35,7 +35,7 @@ class GuitaLogo extends StatelessWidget {
           style: style,
           children: [
             const TextSpan(text: 'G'),
-            TextSpan(text: 'u', style: TextStyle(color: uColor ?? white)),
+            TextSpan(text: 'ü', style: TextStyle(color: uColor ?? white)),
             const TextSpan(text: 'ita'),
           ],
         ),
