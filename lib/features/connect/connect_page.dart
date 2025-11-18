@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:guita/shared/widgets/gradient_background.dart';
 import 'package:guita/shared/widgets/guita_logo.dart';
+import 'package:guita/ble/ble_service.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 class ConnectPage extends StatefulWidget {
   const ConnectPage({super.key});
@@ -11,47 +13,211 @@ class ConnectPage extends StatefulWidget {
 }
 
 class _ConnectPageState extends State<ConnectPage> {
+  final BleService _bleService = BleService();
+  
   bool scanning = false;
   bool connected = false;
   String petName = 'Name Cat';
   String? chosenDevice;
   List<String> found = const [];
+  String errorMessage = '';
 
   // 👉 Ruta del asset de la mascota
   static const String _mascotaAsset = 'assets/images/mascota.png';
 
-  Future<void> _startScan() async {
+  @override
+  void initState() {
+    super.initState();
+    _bleService.dataStream.listen((data) {
+      print('📊 Dato recibido desde Arduino: $data');
+    });
+  }
+
+  @override
+  void dispose() {
+    // cuando el usuario navegue a otras páginas
+    super.dispose();
+  }
+
+  Future<bool> _requestPermissions() async {
+    print('🔐 Solicitando permisos BLE y ubicación...');
+    
+    // En Android 12+ (API 31+) necesitamos permisos específicos de Bluetooth
+    Map<Permission, PermissionStatus> statuses = await [
+      Permission.bluetoothScan,
+      Permission.bluetoothConnect,
+      Permission.location,
+    ].request();
+
+    bool allGranted = statuses.values.every((status) => status.isGranted);
+    
+    if (allGranted) {
+      print('✅ Todos los permisos concedidos');
+      return true;
+    } else {
+      print('❌ Permisos denegados: $statuses');
+      
+      // Verificar si algún permiso fue denegado permanentemente
+      bool permanentlyDenied = statuses.values.any((status) => status.isPermanentlyDenied);
+      
+      if (permanentlyDenied) {
+        _showPermissionSettingsDialog();
+      } else {
+        _showPermissionDeniedDialog();
+      }
+      
+      return false;
+    }
+  }
+
+  void _showPermissionDeniedDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Permisos necesarios'),
+        content: const Text(
+          'Esta aplicación necesita permisos de Bluetooth y Ubicación para escanear dispositivos BLE.\n\n'
+          'Por favor, acepta los permisos para continuar.'
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+              _startScanAndConnect();
+            },
+            child: const Text('Intentar de nuevo'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showPermissionSettingsDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Permisos denegados'),
+        content: const Text(
+          'Los permisos de Bluetooth fueron denegados permanentemente.\n\n'
+          'Por favor, ve a Configuración y habilita los permisos manualmente.'
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+              openAppSettings();
+            },
+            child: const Text('Ir a Configuración'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _startScanAndConnect() async {
     setState(() {
       scanning = true;
       connected = false;
       chosenDevice = null;
       found = const [];
+      errorMessage = '';
     });
-    await Future.delayed(const Duration(milliseconds: 1600));
-    if (!mounted) return;
-    setState(() {
-      scanning = false;
-      found = const ['GuitaMeter-1234', 'GuitaMeter-56A9', 'GuitaMeter-Lite'];
-    });
+
+    try {
+      // Primero solicitar permisos
+      bool permissionsGranted = await _requestPermissions();
+      
+      if (!permissionsGranted) {
+        setState(() {
+          scanning = false;
+          errorMessage = 'Permisos necesarios no concedidos';
+        });
+        return;
+      }
+
+      print('🔍 Iniciando escaneo BLE real...');
+      
+      // Llamar al servicio BLE para escanear y conectar
+      await _bleService.scanAndConnect();
+      
+      if (!mounted) return;
+      
+      // Si llegamos aquí, la conexión fue exitosa
+      setState(() {
+        scanning = false;
+        connected = true;
+        chosenDevice = 'GuitaBLE';
+        found = ['GuitaBLE'];
+      });
+      
+      print('✅ Conexión BLE establecida exitosamente');
+      
+    } catch (e) {
+      print('❌ Error en conexión BLE: $e');
+      
+      if (!mounted) return;
+      
+      setState(() {
+        scanning = false;
+        connected = false;
+        chosenDevice = null;
+        found = const [];
+        errorMessage = 'Error: No se pudo conectar. Verifica que el Arduino esté encendido y cerca.';
+      });
+      
+      _showErrorDialog(e.toString());
+    }
   }
 
-  Future<void> _connect() async {
-    setState(() => scanning = true);
-    await Future.delayed(const Duration(milliseconds: 1200));
-    if (!mounted) return;
-    setState(() {
-      scanning = false;
-      connected = true;
-    });
+  void _showErrorDialog(String error) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Error de conexión'),
+        content: Text('No se pudo conectar al dispositivo BLE:\n\n$error\n\n'
+            'Asegúrate de que:\n'
+            '• El Bluetooth esté activado\n'
+            '• El Arduino esté encendido\n'
+            '• El dispositivo esté cerca\n'
+            '• Los permisos de Bluetooth estén otorgados'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cerrar'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+              _startScanAndConnect();
+            },
+            child: const Text('Reintentar'),
+          ),
+        ],
+      ),
+    );
   }
 
-  void _reset() {
+  Future<void> _disconnect() async {
+    await _bleService.disconnect();
     setState(() {
       scanning = false;
       connected = false;
       chosenDevice = null;
       found = const [];
+      errorMessage = '';
     });
+  }
+
+  void _reset() {
+    _disconnect();
   }
 
   @override
@@ -150,30 +316,60 @@ class _ConnectPageState extends State<ConnectPage> {
                               const SizedBox(height: 14),
                               Text(
                                 connected
-                                    ? '¡Conectado!'
+                                    ? '¡Conectado a GuitaBLE!'
                                     : scanning
-                                        ? 'Buscando dispositivos…'
-                                        : (found.isEmpty ? 'Listo para buscar' : 'Selecciona un dispositivo'),
+                                        ? 'Buscando GuitaBLE…'
+                                        : 'Listo para buscar',
                                 style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
                               ),
 
-                              if (!scanning && found.isNotEmpty && !connected) ...[
+                              if (errorMessage.isNotEmpty) ...[
+                                const SizedBox(height: 12),
+                                Container(
+                                  padding: const EdgeInsets.all(10),
+                                  decoration: BoxDecoration(
+                                    color: Colors.red.withValues(alpha: .2),
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(color: Colors.red.withValues(alpha: .4)),
+                                  ),
+                                  child: Text(
+                                    errorMessage,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 12,
+                                    ),
+                                    textAlign: TextAlign.center,
+                                  ),
+                                ),
+                              ],
+
+                              if (connected && chosenDevice != null) ...[
                                 const SizedBox(height: 14),
-                                ConstrainedBox(
-                                  constraints: const BoxConstraints(maxHeight: 180),
-                                  child: ListView.separated(
-                                    shrinkWrap: true,
-                                    itemCount: found.length,
-                                    separatorBuilder: (_, __) => const SizedBox(height: 8),
-                                    itemBuilder: (_, i) {
-                                      final dev = found[i];
-                                      final selected = dev == chosenDevice;
-                                      return _DeviceTile(
-                                        name: dev,
-                                        selected: selected,
-                                        onTap: () => setState(() => chosenDevice = dev),
-                                      );
-                                    },
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withValues(alpha: .22),
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(
+                                      color: Colors.white,
+                                      width: 1.4,
+                                    ),
+                                  ),
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Icon(Icons.memory, color: Colors.white.withValues(alpha: .95)),
+                                      const SizedBox(width: 10),
+                                      Text(
+                                        chosenDevice!,
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 10),
+                                      const Icon(Icons.check_circle, color: Colors.white, size: 20),
+                                    ],
                                   ),
                                 ),
                               ],
@@ -182,19 +378,15 @@ class _ConnectPageState extends State<ConnectPage> {
 
                               if (!connected)
                                 FilledButton.icon(
-                                  onPressed: scanning
-                                      ? null
-                                      : (found.isEmpty ? _startScan : (chosenDevice == null ? null : _connect)),
+                                  onPressed: scanning ? null : _startScanAndConnect,
                                   style: FilledButton.styleFrom(
                                     backgroundColor: Colors.black,
                                     foregroundColor: Colors.white,
                                     shape: const StadiumBorder(),
                                     padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
                                   ),
-                                  icon: Icon(found.isEmpty ? Icons.search : Icons.link),
-                                  label: Text(found.isEmpty
-                                      ? 'Buscar dispositivo'
-                                      : (chosenDevice == null ? 'Selecciona uno' : 'Conectar')),
+                                  icon: const Icon(Icons.search),
+                                  label: const Text('Buscar y Conectar'),
                                 ),
 
                               if (connected)
@@ -219,7 +411,7 @@ class _ConnectPageState extends State<ConnectPage> {
                         Row(
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
-                            // badge “!”
+                            // badge "!"
                             const _Badge(
                               icon: Icons.priority_high,
                               background: Color(0xFF7ED957),
@@ -235,7 +427,7 @@ class _ConnectPageState extends State<ConnectPage> {
                                   _HelpBubble(
                                     text: connected
                                         ? '¡Excelente! Tu sensor ya está enlazado. Ve al panel cuando quieras.'
-                                        : 'Enciende tu medidor, acércalo al teléfono y presiona “Buscar dispositivo”.',
+                                        : 'Enciende tu Arduino (GuitaBLE), acércalo al teléfono y presiona "Buscar y Conectar".',
                                   ),
                                   const Positioned(
                                     right: -8,
@@ -279,47 +471,6 @@ class _ConnectPageState extends State<ConnectPage> {
     );
   }
 }
-
-class _DeviceTile extends StatelessWidget {
-  final String name;
-  final bool selected;
-  final VoidCallback onTap;
-  const _DeviceTile({required this.name, required this.selected, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: selected ? Colors.white.withValues(alpha: .22) : Colors.white.withValues(alpha: .10),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: selected ? Colors.white : Colors.white.withValues(alpha: .25),
-            width: selected ? 1.4 : 1,
-          ),
-        ),
-        child: Row(
-          children: [
-            Icon(Icons.memory, color: Colors.white.withValues(alpha: .95)),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                name,
-                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
-              ),
-            ),
-            if (selected) const Icon(Icons.check_circle, color: Colors.white, size: 20),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ────────────────────────── Widgets de apoyo ──────────────────────────
 
 class _HelpBubble extends StatelessWidget {
   final String text;
